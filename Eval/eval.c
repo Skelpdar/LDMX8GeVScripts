@@ -9,7 +9,7 @@
  *EcalVeto/bdtTreeMaker.py in IncandelaLab/LDMX-scripts
  */
 
-R__LOAD_LIBRARY(/PathTo/libEvent.sp)
+R__LOAD_LIBRARY(PATH/libEvent.so)
 
 #include "TFile.h"
 #include "TTree.h"
@@ -24,6 +24,7 @@ R__LOAD_LIBRARY(/PathTo/libEvent.sp)
 #include <sstream>
 #include <iomanip>
 #include <algorithm>
+#include <math.h>
 
 //Path to the header files must be specified before this macro starts.
 //E.g. with gROOT->ProcessLine(".include PATH");
@@ -34,6 +35,9 @@ R__LOAD_LIBRARY(/PathTo/libEvent.sp)
 #include "Event/SimParticle.h"
 #include "Event/SimTrackerHit.h"
 #include "Event/EcalVetoResult.h"
+#include "Event/FindableTrackResult.h"
+#include "Event/HcalVetoResult.h"
+#include "Event/HcalHit.h"
 
 TString vectorToPredCMD(std::vector<double> bdtFeatures) {
     TString featuresStrVector = "[[";
@@ -77,7 +81,7 @@ Double_t sample4SigmaTail(TRandom3* rng){
     }
 }
 
-void eval(TString infilename, TString outfilename, bool noise = false){
+void eval(TString infilename, TString outfilename, bool noise = false, double noiseFactor = 1.25){
     std::cout << "Starting BDT evaluation" << std::endl;
 
     TPython::Exec("print(\'Loading xgboost BDT\')"); 
@@ -107,7 +111,24 @@ void eval(TString infilename, TString outfilename, bool noise = false){
 
         TPython::Exec("i_ += 1");
     }
-    
+   
+    //Build nearest neighbours map
+    std::map<int,std::vector<int>> NNMap;
+
+    double nCellsWide = 23;
+    double moduler = 85;
+    double moduleR = moduler*(2./sqrt(3.));
+    double cellr = moduleR/(nCellsWide-1./3.);
+
+    for(int j = 0; j < 2779; j++){
+        for(int k = 0; k < 2779; k++){
+            double dist = sqrt(pow(cellX.at(k)-cellX.at(j),2)+pow(cellY.at(k)-cellY.at(j),2));
+            if(dist > cellr && dist <= 3.*cellr){
+                NNMap[j].push_back(k);
+            }
+        }
+    }
+ 
     //Constants
 
     std::vector<double> layerZs{223.8000030517578, 226.6999969482422, 233.0500030517578, 237.4499969482422, 245.3000030517578, 251.1999969482422, 260.29998779296875,266.70001220703125, 275.79998779296875, 282.20001220703125, 291.29998779296875, 297.70001220703125, 306.79998779296875, 313.20001220703125,322.29998779296875, 328.70001220703125, 337.79998779296875, 344.20001220703125, 353.29998779296875, 359.70001220703125, 368.79998779296875,375.20001220703125, 384.29998779296875, 390.70001220703125, 403.29998779296875, 413.20001220703125, 425.79998779296875, 435.70001220703125,448.29998779296875, 458.20001220703125, 470.79998779296875, 480.70001220703125, 493.29998779296875, 503.20001220703125};
@@ -167,6 +188,17 @@ void eval(TString infilename, TString outfilename, bool noise = false){
     //Float_t avgLayerHit;
     //intree->SetBranchAddress("EcalVeto_recon.avgLayerHit_",&avgLayerHit);
     //TPython::Bind(avgLayerHit,"avgLayerHit");
+    
+    Int_t nHits;
+    Float_t summedDet;
+    Float_t summedTightIso;
+    Float_t maxCellDep;
+    Float_t showerRMS;
+    Float_t xStd;
+    Float_t yStd;
+    Float_t avgLayerHit;
+    Float_t stdLayerHit;
+    Int_t deepestLayerHit;
 
     TClonesArray* ecalHits = new TClonesArray("ldmx::EcalHit");
     intree->SetBranchAddress("ecalDigis_recon",&ecalHits);
@@ -183,6 +215,12 @@ void eval(TString infilename, TString outfilename, bool noise = false){
     TClonesArray* ecalVetoResult = new TClonesArray("ldmx::EcalVetoResult");
     intree->SetBranchAddress("EcalVeto_recon",&ecalVetoResult);
 
+    TClonesArray* findableTracks = new TClonesArray("ldmx::FindableTrackResult");
+    intree->SetBranchAddress("FindableTracks_recon", &findableTracks);
+
+    TClonesArray* hcalVetoResult = new TClonesArray("ldmx::HcalVetoResult");
+    intree->SetBranchAddress("HcalVeto_recon",&hcalVetoResult);
+
     TPython::Exec("ecalVetoRes = ROOT.TClonesArray(\"ldmx::EcalVetoResult\")");
     TPython::Bind(intree,"intree");
     TPython::Exec("intree.SetBranchAddress(\"EcalVeto_recon\",ecalVetoRes)");
@@ -192,9 +230,17 @@ void eval(TString infilename, TString outfilename, bool noise = false){
     TFile* outfile = new TFile(outfilename, "RECREATE");
     TTree* outtree = new TTree("BDTree", "BDT Scores");
     
-    //Double_t score;
     double score;
     auto branch = outtree->Branch("Score", &score);
+
+    bool passesTrackVeto;
+    auto vetoBranch = outtree->Branch("passesTrackVeto", &passesTrackVeto);
+
+    bool passesHcalVeto;
+    auto hcalBranch = outtree->Branch("passesHcalVeto", &passesHcalVeto); 
+
+    int maxPE;
+    auto maxPEBranch = outtree->Branch("maxPE", &maxPE);
 
     //Process all events
 
@@ -203,13 +249,36 @@ void eval(TString infilename, TString outfilename, bool noise = false){
     //Seed set to 0 for random seed
     TRandom3* rng = new TRandom3(0);
 
-    //TPython::Exec("i=1700");
+    double noiseProb = noiseFactor * ROOT::Math::normal_cdf_c(4*noiseFactor*1506.32*0.13/33000, noiseFactor*1506.32*0.13/33000);
+    std::cout << "noiseProb " << noiseProb << std::endl;
+
+    int passedTrack = 0;
+    int passedHcal = 0;
+    int passed0_999 = 0;
+
+    int passedAll = 0;
+
     TPython::Exec("i=0");
-    //for(int i=1700; i<1900; i++){
     for(int i=0; i<intree->GetEntriesFast(); i++){
+    //for(int i=0; i<5; i++){
 
         //std::cout << i << std::endl;
- 
+        
+        nHits = 0; 
+        summedDet = 0; 
+        summedTightIso = 0; 
+        maxCellDep = 0; 
+        showerRMS = 0; 
+        xStd = 0; 
+        yStd = 0; 
+        avgLayerHit = 0; 
+        stdLayerHit = 0;
+        deepestLayerHit = 0; 
+
+        Float_t xMean = 0;
+        Float_t yMean = 0;
+        Float_t wavgLayerHit = 0;
+
         intree->GetEntry(i);
 
         //Find electron and photon trajectories
@@ -221,13 +290,17 @@ void eval(TString infilename, TString outfilename, bool noise = false){
         std::vector<double> pvec0;
         std::vector<float> pos0;
 
+        std::vector<double> vetoP;
+
         double pz;
+
+        int electronTrackID;
 
         for(int k=0; k < simParticles->GetEntriesFast(); k++){
             ldmx::SimParticle* particle = (ldmx::SimParticle*)simParticles->At(k);
             if(particle->getPdgID() == 11 && particle->getParentCount() == 0){
 
-                int electronTrackID = particle->getTrackID();
+                electronTrackID = particle->getTrackID();
 
                 for(int j=0; j < simTrackerHits->GetEntriesFast(); j++){
                     
@@ -237,6 +310,10 @@ void eval(TString infilename, TString outfilename, bool noise = false){
                     //auto e = hit->getSimParticle();
                     //Match the TrackID instead
                     int hitTrackID = hit->getTrackID();
+
+                    //if(hitTrackID == electronTrackID && hit->getLayerID() == 2){
+                    //    vetoP = hit->getMomentum();
+                    //}
 
                     //Why does the original script check if p.z > 0 ?
                     if(hitTrackID == electronTrackID && hit->getLayerID() == 1){
@@ -260,20 +337,74 @@ void eval(TString infilename, TString outfilename, bool noise = false){
 
             }
         }
-                
-        //if(foundElectron == false){
-            //std::cout << "Could not find electron hit on ECal in event: " << i << std::endl;
-            //std::cout << simTrackerHits->GetEntriesFast() << std::endl;
-            //std::cout << pz << std::endl;
-            //continue;
-        //}
-        
-        //if(foundTargetElectron == false){
-            //std::cout << "Could not find electron hit on target in event: " << i << std::endl;
 
-            //continue;
-        //}
-        
+        //Check track veto        
+        int numOfFindableTracks = 0;
+        bool trackFindable = false; 
+        std::vector<double> trackP;
+
+        std::vector<int> trackIDs;
+
+        for(int k=0; k < findableTracks->GetEntriesFast(); k++){
+            
+            ldmx::FindableTrackResult* track = (ldmx::FindableTrackResult*)findableTracks->At(k);
+
+            if(track->is4sFindable() || track->is3s1aFindable() || track->is2s2aFindable()){
+            //if(true){
+               
+                //Removes possible "findableTrack" duplicates from the same particle
+                if(std::find(trackIDs.begin(), trackIDs.end(), track->getSimParticle()->getTrackID()) == trackIDs.end()){       
+                    numOfFindableTracks += 1;
+                }
+
+                trackIDs.push_back(track->getSimParticle()->getTrackID());
+
+                ldmx::SimParticle* particle = track->getSimParticle();
+    
+                int particleTrackID = particle->getTrackID();
+
+                //Find momentum from SP hit
+                for(int j=0; j < targetSPHits->GetEntriesFast(); j++){
+                    ldmx::SimTrackerHit* hit = (ldmx::SimTrackerHit*)targetSPHits->At(j);
+
+                    int hitTrackID = hit->getTrackID();
+
+                    if(hitTrackID == particleTrackID && hit->getLayerID() == 2){
+                        trackP = hit->getMomentum();
+                        std::cout << hit->getPdgID() << std::endl;
+                        trackFindable = true;
+                    }
+                }
+            }
+        }
+
+        //std::cout << numOfFindableTracks << ":" << trackFindable<< std::endl;
+
+        passesTrackVeto = false;
+
+        if(numOfFindableTracks == 1 && trackFindable){
+            if(TMath::Sqrt(pow(trackP.at(0),2)+pow(trackP.at(1),2)+pow(trackP.at(2),2)) < 2400){
+                passesTrackVeto = true;
+            }
+        }
+
+        //std::cout << numOfFindableTracks << ":" << trackFindable << ":" << passesTrackVeto << std::endl;
+
+        if(passesTrackVeto){
+            passedTrack += 1;
+        }
+
+        //Hcal veto
+        ldmx::HcalHit* hcalhit = ((ldmx::HcalVetoResult*)hcalVetoResult->At(0))->getMaxPEHit();
+
+        maxPE = hcalhit->getPE(); 
+
+        passesHcalVeto = false;
+        if(maxPE < 5){
+            passedHcal += 1;
+            passesHcalVeto = true;
+        }        
+
         //Find trajectory of electron and (inferred) recoil photon 
         std::vector<double> elePosX;
         std::vector<double> elePosY;
@@ -438,7 +569,18 @@ void eval(TString infilename, TString outfilename, bool noise = false){
         //bool* occupiedCells = new bool[2779*34];
         bool occupiedCells[2779*34];
         std::fill(occupiedCells, occupiedCells+2779*34, false);
+        bool occupiedCellsProjected[2779];
+        std::fill(occupiedCellsProjected, occupiedCellsProjected+2779, false);
 
+        std::vector<double> allX;
+        std::vector<double> allY;
+        std::vector<double> allE; 
+        std::vector<double> allLayer;
+        std::vector<int> allmcid;
+
+        double wgtCentroidCoordsX = 0;
+        double wgtCentroidCoordsY = 0;
+        //double sumEdep = 0;
 
         //Dont calculate photon containments even if that trajectory is found, when the electron ecal hit is missing
         if(foundElectron){
@@ -481,23 +623,53 @@ void eval(TString infilename, TString outfilename, bool noise = false){
                     distancePhoton = TMath::Sqrt(pow(hitX -photonPosX.at(layer),2)+pow(hitY-photonPosY.at(layer),2));
                 }
 
+                
+
                 double hitE = hit->getEnergy();
 
                 //Add noise and check whether it falls below the threshold
 
-                if(hit->isNoise()){
-                    continue;
-                }
-
+                //Ignore all pure noise hits from the simulation
+                //Added Gaussian noise to actual hits can not be removed
                 if(noise){
-                    hitE += rng->Gaus(0,1.25*1506.32*0.13/33000);
-     
-                    if(!(hitE > 4*1506.32*0.13/33000)){
+                    if(hit->isNoise()){
                         continue;
                     }
                 }
- 
+
+                if(noise){
+                    hitE += rng->Gaus(0,noiseFactor*1506.32*0.13/33000);
+     
+                    if(!(hitE > 4*noiseFactor*1506.32*0.13/33000)){
+                        continue;
+                    }
+                }
+                else{
+                    if(!(hitE > 0)){
+                        continue;
+                    }
+                }
+
+                allE.push_back(hitE);
+                allX.push_back(hitX);
+                allY.push_back(hitY);
+                allLayer.push_back(layer);
+                allmcid.push_back(mcid_index);
+
+                summedDet += hitE;
+                nHits++;
+
+                xMean += hitX*hitE;
+                yMean += hitY*hitE;
+
+                avgLayerHit += layer;
+                wavgLayerHit += layer*hitE;
+
+                wgtCentroidCoordsX += hitX*hitE;
+                wgtCentroidCoordsY += hitY*hitE;
+
                 occupiedCells[mcid_index+layer*2779] = true;
+                occupiedCellsProjected[mcid_index] = true;
  
                 if(layer >= 20){
                     ecalBackEnergy += hitE;
@@ -634,6 +806,81 @@ void eval(TString infilename, TString outfilename, bool noise = false){
             }
 
         }
+        //This isn't used if noise is not introduced 
+        if(!foundElectron && noise){
+                for(int k=0; k < ecalHits->GetEntriesFast(); k++){
+                    ldmx::EcalHit* hit = (ldmx::EcalHit*)ecalHits->At(k);
+                    
+                    double hitE = hit->getEnergy();
+                    int rawID = hit->getID();
+
+                    //The raw ID is packed with:
+                    //4 bits for the subdetector, 8 cell layer bits, 3 module bits and 17 cell bits
+                    //On the form: ccccccccccccccccc mmm llllllll ssss
+                    //int layermask = 0xFF << 20;
+                    //int layer = (layermask & rawID) >> 20;
+                    int layermask = 0xFF << 4;
+                    int layer = (layermask & rawID) >> 4;            
+
+                    //int modulemask = 0x7 << 17;
+                    //int module = (modulemask & rawID) >> 17;
+                    int modulemask = 0x7 << 12;
+                    int module = (modulemask & rawID) >> 12;
+
+                    //int cellmask = 0x1FFFF;
+                    //int cell = rawID & 0x1FFFF;
+                    int cellmask = 0x1FFFF << 15;
+                    int cell = (rawID & cellmask) >> 15;
+
+                    int mcid_val = 10*cell+module;
+                    //int mcid_index_slow = findCellIndex(mcid, mcid_val);
+                    int mcid_index = (mcid_val % 10)*396 + (mcid_val - (mcid_val % 10))/10+ (mcid_val % 10);// + 1;
+                   // std::cout << mcid_val << ":" <<mcid_index_slow << ":" << mcid_index << std::endl;
+
+                    double hitX = cellX.at(mcid_index);
+                    double hitY = cellY.at(mcid_index);
+                   
+                    if(noise){ 
+                        if(hit->isNoise()){
+                            continue;
+                        }
+                    }
+                    if(noise){
+                        hitE += rng->Gaus(0,noiseFactor*1506.32*0.13/33000);
+     
+                        if(!(hitE > 4*noiseFactor*1506.32*0.13/33000)){
+                            continue;
+                        }
+                    }
+                    else{
+                        if(!(hitE > 0)){
+                            continue;
+                        }
+                    }
+
+                    allE.push_back(hitE);
+                    allX.push_back(hitX);
+                    allY.push_back(hitY);
+                    allLayer.push_back(layer);
+                    allmcid.push_back(mcid_index);
+
+                    occupiedCellsProjected[mcid_index] = true;
+                    occupiedCells[layer*2779+mcid_index] = true;
+
+                    wgtCentroidCoordsX += hitX*hitE;
+                    wgtCentroidCoordsY += hitY*hitE;
+                    
+                    nHits += 1;
+                    summedDet += hitE;
+
+                    xMean += hitX*hitE;
+                    yMean += hitY*hitE;
+                    
+                    avgLayerHit += layer;
+                    wavgLayerHit += layer*hitE;
+
+                }
+        }
 
         /*
         Noise generation on empty hits
@@ -643,9 +890,9 @@ void eval(TString infilename, TString outfilename, bool noise = false){
         */
         
         //Hardcoded with sigma = 1.25 of original noise
-        int newNoiseHits = rng->Binomial(2779*34, 0.000687138);
+        int newNoiseHits = rng->Binomial(2779*34, noiseProb);
 
-        if(foundElectron && noise){
+        if(noise){
             for(int k = 0; k < newNoiseHits; k++){
                 while(true){
                     Int_t place = rng->Integer(2779*34);
@@ -656,151 +903,172 @@ void eval(TString infilename, TString outfilename, bool noise = false){
                         Int_t layer = (Int_t)((place - (place % 2779))/2779);
 
                         //Add hit with 1.25*4ms
-                        double hitE = sample4SigmaTail(rng)*1.25*1506.32*0.13/33000;
+                        double hitE = sample4SigmaTail(rng)*noiseFactor*1506.32*0.13/33000;
                         occupiedCells[place] = true;
+                        occupiedCellsProjected[mcid_index] = true;
+                
+                        summedDet += hitE;
+                        nHits++;
                         
                         double hitX = cellX.at(mcid_index);
                         double hitY = cellY.at(mcid_index);
                         
-                        double distanceEle = TMath::Sqrt(pow(hitX -elePosX.at(layer),2)+pow(hitY-elePosY.at(layer),2));
-
-                        //double distancePhoton = TMath::Sqrt(pow(hitX -photonPosX.at(layer),2)+pow(hitY-photonPosY.at(layer),2));
-                        double distancePhoton = -1;
-                        if(foundTargetElectron){
-                            distancePhoton = TMath::Sqrt(pow(hitX -photonPosX.at(layer),2)+pow(hitY-photonPosY.at(layer),2));
-                        }
-     
-                        if(layer >= 20){
-                            ecalBackEnergy += hitE;
-                        }
-
-                        double ir_radius = radii.at((ir-1)*34+layer);
-
-                        if(distanceEle < ir_radius){
-                            ele68ContEnergy += hitE;
-                            ele68Totals.at(layer) += hitE;
-                        }
-                        else if(distanceEle < 2*ir_radius){
-                            ele68x2ContEnergy += hitE;
-                        }
-                        else if(distanceEle < 3*ir_radius){
-                            ele68x3ContEnergy += hitE;
-                        }
-                        else if(distanceEle < 4*ir_radius){
-                            ele68x4ContEnergy += hitE;
-                        }
-                        else if(distanceEle < 5*ir_radius){
-                            ele68x5ContEnergy += hitE;
-                        }
-                
-                        double ip_radius = radii.at(layer);
+                        allE.push_back(hitE);
+                        allX.push_back(hitX);
+                        allY.push_back(hitY);
+                        allLayer.push_back(layer);
+                        allmcid.push_back(mcid_index);
                         
-                        if(distancePhoton < ip_radius && distancePhoton > 0){
-                            photon68ContEnergy += hitE;
-                            photon68Totals.at(layer) += hitE;
-                        }
-                        else if(distancePhoton < 2*ip_radius && distancePhoton > 0){
-                            photon68x2ContEnergy += hitE;
-                        }
-                        else if(distancePhoton < 3*ip_radius && distancePhoton > 0){
-                            photon68x3ContEnergy += hitE;
-                        }
-                        else if(distancePhoton < 4*ip_radius && distancePhoton > 0){
-                            photon68x4ContEnergy += hitE;
-                        }
-                        else if(distancePhoton < 5*ip_radius && distancePhoton > 0){
-                            photon68x5ContEnergy += hitE;
-                        }
+                        xMean += hitX*hitE;
+                        yMean += hitY*hitE;
 
-                        if(distanceEle < ir_radius && distancePhoton < ip_radius && distancePhoton > 0){
-                            overlap68ContEnergy += hitE;
-                            overlap68Totals.at(layer) += hitE;
-                        }
-                        if(distanceEle < 2*ir_radius && distancePhoton < 2*ip_radius && distancePhoton > 0){
-                            overlap68x2ContEnergy += hitE;
-                        }
-                        if(distanceEle < 3*ir_radius && distancePhoton < 3*ip_radius && distancePhoton > 0){
-                            overlap68x3ContEnergy += hitE;
-                        }
-                        if(distanceEle < 4*ir_radius && distancePhoton < 4*ip_radius && distancePhoton > 0){
-                            overlap68x4ContEnergy += hitE;
-                        }
-                        if(distanceEle < 5*ir_radius && distancePhoton < 5*ip_radius && distancePhoton > 0){
-                            overlap68x5ContEnergy += hitE;
-                        }
+                        avgLayerHit += layer;
+                        wavgLayerHit += layer*hitE;
 
-                        std::vector<double> hitPosition{hitX,hitY,(double)layer,hitE};
+                        wgtCentroidCoordsX += hitX*hitE;
+                        wgtCentroidCoordsY += hitY*hitE;
 
-                        if(distanceEle > ir_radius && distancePhoton > ip_radius){
-                            outside68Totals.at(layer) += hitE;
-                            outside68NHits.at(layer) += 1;
-                            outside68Xmean.at(layer) += hitX*hitE;
-                            outside68Ymean.at(layer) += hitY*hitE;
-                            outside68ContEnergy += hitE;
-                            outside68ContNHits += 1;
-                            outside68ContXmean += hitX*hitE;
-                            outside68ContYmean += hitY*hitE;
-                            outside68WgtCentroidCoordsX += hitX*hitE;
-                            outside68WgtCentroidCoordsY += hitY*hitE;
-                            //outside68HitPositions.push_back(hitPosition);           
-                            outside68HitPositionsX.push_back(hitX);           
-                            outside68HitPositionsY.push_back(hitY);           
-                            outside68HitPositionsLayer.push_back(layer);           
-                            outside68HitPositionsE.push_back(hitE);           
-                        }
-                        if(distanceEle > 2*ir_radius && distancePhoton > 2*ip_radius){
-                            outside68x2ContEnergy += hitE;
-                            outside68x2ContNHits += 1;
-                            outside68x2ContXmean += hitX*hitE;
-                            outside68x2ContYmean += hitY*hitE;
-                            outside68x2WgtCentroidCoordsX += hitX*hitE;
-                            outside68x2WgtCentroidCoordsY += hitY*hitE;
-                            //outside68x2HitPositions.push_back(hitPosition);           
-                            outside68x2HitPositionsX.push_back(hitX);           
-                            outside68x2HitPositionsY.push_back(hitY);           
-                            outside68x2HitPositionsLayer.push_back(layer);           
-                            outside68x2HitPositionsE.push_back(hitE);           
-                        }
-                        if(distanceEle > 3*ir_radius && distancePhoton > 3*ip_radius){
-                            outside68x3ContEnergy += hitE;
-                            outside68x3ContNHits += 1;
-                            outside68x3ContXmean += hitX*hitE;
-                            outside68x3ContYmean += hitY*hitE;
-                            outside68x3WgtCentroidCoordsX += hitX*hitE;
-                            outside68x3WgtCentroidCoordsY += hitY*hitE;
-                            //outside68x3HitPositions.push_back(hitPosition);           
-                            outside68x3HitPositionsX.push_back(hitX);           
-                            outside68x3HitPositionsY.push_back(hitY);           
-                            outside68x3HitPositionsLayer.push_back(layer);           
-                            outside68x3HitPositionsE.push_back(hitE);           
-                        }
-                        if(distanceEle > 4*ir_radius && distancePhoton > 4*ip_radius){
-                            outside68x4ContEnergy += hitE;
-                            outside68x4ContNHits += 1;
-                            outside68x4ContXmean += hitX*hitE;
-                            outside68x4ContYmean += hitY*hitE;
-                            outside68x4WgtCentroidCoordsX += hitX*hitE;
-                            outside68x4WgtCentroidCoordsY += hitY*hitE;
-                            //outside68x4HitPositions.push_back(hitPosition);           
-                            outside68x4HitPositionsX.push_back(hitX);           
-                            outside68x4HitPositionsY.push_back(hitY);           
-                            outside68x4HitPositionsLayer.push_back(layer);           
-                            outside68x4HitPositionsE.push_back(hitE);           
-                        }
-                        if(distanceEle > 5*ir_radius && distancePhoton > 5*ip_radius){
-                            outside68x5ContEnergy += hitE;
-                            outside68x5ContNHits += 1;
-                            outside68x5ContXmean += hitX*hitE;
-                            outside68x5ContYmean += hitY*hitE;
-                            outside68x5WgtCentroidCoordsX += hitX*hitE;
-                            outside68x5WgtCentroidCoordsY += hitY*hitE;
-                            //outside68x5HitPositions.push_back(hitPosition);           
-                            outside68x5HitPositionsX.push_back(hitX);           
-                            outside68x5HitPositionsY.push_back(hitY);           
-                            outside68x5HitPositionsLayer.push_back(layer);           
-                            outside68x5HitPositionsE.push_back(hitE);           
-                        }
+                        if(foundElectron){
 
+                            double distanceEle = TMath::Sqrt(pow(hitX -elePosX.at(layer),2)+pow(hitY-elePosY.at(layer),2));
+
+                            //double distancePhoton = TMath::Sqrt(pow(hitX -photonPosX.at(layer),2)+pow(hitY-photonPosY.at(layer),2));
+                            double distancePhoton = -1;
+                            if(foundTargetElectron){
+                                distancePhoton = TMath::Sqrt(pow(hitX -photonPosX.at(layer),2)+pow(hitY-photonPosY.at(layer),2));
+                            }
+         
+                            if(layer >= 20){
+                                ecalBackEnergy += hitE;
+                            }
+
+                            double ir_radius = radii.at((ir-1)*34+layer);
+
+                            if(distanceEle < ir_radius){
+                                ele68ContEnergy += hitE;
+                                ele68Totals.at(layer) += hitE;
+                            }
+                            else if(distanceEle < 2*ir_radius){
+                                ele68x2ContEnergy += hitE;
+                            }
+                            else if(distanceEle < 3*ir_radius){
+                                ele68x3ContEnergy += hitE;
+                            }
+                            else if(distanceEle < 4*ir_radius){
+                                ele68x4ContEnergy += hitE;
+                            }
+                            else if(distanceEle < 5*ir_radius){
+                                ele68x5ContEnergy += hitE;
+                            }
+                    
+                            double ip_radius = radii.at(layer);
+                            
+                            if(distancePhoton < ip_radius && distancePhoton > 0){
+                                photon68ContEnergy += hitE;
+                                photon68Totals.at(layer) += hitE;
+                            }
+                            else if(distancePhoton < 2*ip_radius && distancePhoton > 0){
+                                photon68x2ContEnergy += hitE;
+                            }
+                            else if(distancePhoton < 3*ip_radius && distancePhoton > 0){
+                                photon68x3ContEnergy += hitE;
+                            }
+                            else if(distancePhoton < 4*ip_radius && distancePhoton > 0){
+                                photon68x4ContEnergy += hitE;
+                            }
+                            else if(distancePhoton < 5*ip_radius && distancePhoton > 0){
+                                photon68x5ContEnergy += hitE;
+                            }
+
+                            if(distanceEle < ir_radius && distancePhoton < ip_radius && distancePhoton > 0){
+                                overlap68ContEnergy += hitE;
+                                overlap68Totals.at(layer) += hitE;
+                            }
+                            if(distanceEle < 2*ir_radius && distancePhoton < 2*ip_radius && distancePhoton > 0){
+                                overlap68x2ContEnergy += hitE;
+                            }
+                            if(distanceEle < 3*ir_radius && distancePhoton < 3*ip_radius && distancePhoton > 0){
+                                overlap68x3ContEnergy += hitE;
+                            }
+                            if(distanceEle < 4*ir_radius && distancePhoton < 4*ip_radius && distancePhoton > 0){
+                                overlap68x4ContEnergy += hitE;
+                            }
+                            if(distanceEle < 5*ir_radius && distancePhoton < 5*ip_radius && distancePhoton > 0){
+                                overlap68x5ContEnergy += hitE;
+                            }
+
+                            std::vector<double> hitPosition{hitX,hitY,(double)layer,hitE};
+
+                            if(distanceEle > ir_radius && distancePhoton > ip_radius){
+                                outside68Totals.at(layer) += hitE;
+                                outside68NHits.at(layer) += 1;
+                                outside68Xmean.at(layer) += hitX*hitE;
+                                outside68Ymean.at(layer) += hitY*hitE;
+                                outside68ContEnergy += hitE;
+                                outside68ContNHits += 1;
+                                outside68ContXmean += hitX*hitE;
+                                outside68ContYmean += hitY*hitE;
+                                outside68WgtCentroidCoordsX += hitX*hitE;
+                                outside68WgtCentroidCoordsY += hitY*hitE;
+                                //outside68HitPositions.push_back(hitPosition);           
+                                outside68HitPositionsX.push_back(hitX);           
+                                outside68HitPositionsY.push_back(hitY);           
+                                outside68HitPositionsLayer.push_back(layer);           
+                                outside68HitPositionsE.push_back(hitE);           
+                            }
+                            if(distanceEle > 2*ir_radius && distancePhoton > 2*ip_radius){
+                                outside68x2ContEnergy += hitE;
+                                outside68x2ContNHits += 1;
+                                outside68x2ContXmean += hitX*hitE;
+                                outside68x2ContYmean += hitY*hitE;
+                                outside68x2WgtCentroidCoordsX += hitX*hitE;
+                                outside68x2WgtCentroidCoordsY += hitY*hitE;
+                                //outside68x2HitPositions.push_back(hitPosition);           
+                                outside68x2HitPositionsX.push_back(hitX);           
+                                outside68x2HitPositionsY.push_back(hitY);           
+                                outside68x2HitPositionsLayer.push_back(layer);           
+                                outside68x2HitPositionsE.push_back(hitE);           
+                            }
+                            if(distanceEle > 3*ir_radius && distancePhoton > 3*ip_radius){
+                                outside68x3ContEnergy += hitE;
+                                outside68x3ContNHits += 1;
+                                outside68x3ContXmean += hitX*hitE;
+                                outside68x3ContYmean += hitY*hitE;
+                                outside68x3WgtCentroidCoordsX += hitX*hitE;
+                                outside68x3WgtCentroidCoordsY += hitY*hitE;
+                                //outside68x3HitPositions.push_back(hitPosition);           
+                                outside68x3HitPositionsX.push_back(hitX);           
+                                outside68x3HitPositionsY.push_back(hitY);           
+                                outside68x3HitPositionsLayer.push_back(layer);           
+                                outside68x3HitPositionsE.push_back(hitE);           
+                            }
+                            if(distanceEle > 4*ir_radius && distancePhoton > 4*ip_radius){
+                                outside68x4ContEnergy += hitE;
+                                outside68x4ContNHits += 1;
+                                outside68x4ContXmean += hitX*hitE;
+                                outside68x4ContYmean += hitY*hitE;
+                                outside68x4WgtCentroidCoordsX += hitX*hitE;
+                                outside68x4WgtCentroidCoordsY += hitY*hitE;
+                                //outside68x4HitPositions.push_back(hitPosition);           
+                                outside68x4HitPositionsX.push_back(hitX);           
+                                outside68x4HitPositionsY.push_back(hitY);           
+                                outside68x4HitPositionsLayer.push_back(layer);           
+                                outside68x4HitPositionsE.push_back(hitE);           
+                            }
+                            if(distanceEle > 5*ir_radius && distancePhoton > 5*ip_radius){
+                                outside68x5ContEnergy += hitE;
+                                outside68x5ContNHits += 1;
+                                outside68x5ContXmean += hitX*hitE;
+                                outside68x5ContYmean += hitY*hitE;
+                                outside68x5WgtCentroidCoordsX += hitX*hitE;
+                                outside68x5WgtCentroidCoordsY += hitY*hitE;
+                                //outside68x5HitPositions.push_back(hitPosition);           
+                                outside68x5HitPositionsX.push_back(hitX);           
+                                outside68x5HitPositionsY.push_back(hitY);           
+                                outside68x5HitPositionsLayer.push_back(layer);           
+                                outside68x5HitPositionsE.push_back(hitE);           
+                            }
+                        }
                         break;
                     }
                 }
@@ -935,21 +1203,184 @@ void eval(TString infilename, TString outfilename, bool noise = false){
             outside68x5ContXstd = TMath::Sqrt(outside68x5ContXstd/outside68x5ContEnergy);
             outside68x5ContYstd = TMath::Sqrt(outside68x5ContYstd/outside68x5ContEnergy);
         }
- 
-        //Evaluate BDT score
-        TPython::Exec("intree.GetEntry(i); i +=1");
 
-        Int_t nHits = TPython::Eval("ecalVetoRes[0].getNReadoutHits()");
-        Float_t summedDet = TPython::Eval("ecalVetoRes[0].getSummedDet()");
-        Float_t summedTightIso = TPython::Eval("ecalVetoRes[0].getSummedTightIso()");
-        Float_t maxCellDep = TPython::Eval("ecalVetoRes[0].getMaxCellDep()");
-        Float_t showerRMS = TPython::Eval("ecalVetoRes[0].getShowerRMS()");
-        Float_t xStd = TPython::Eval("ecalVetoRes[0].getXStd()");
-        Float_t yStd = TPython::Eval("ecalVetoRes[0].getYStd()");
-        Float_t avgLayerHit = TPython::Eval("ecalVetoRes[0].getAvgLayerHit()");
-        Float_t stdLayerHit = TPython::Eval("ecalVetoRes[0].getStdLayerHit()");
-        Int_t deepestLayerHit = TPython::Eval("ecalVetoRes[0].getDeepestLayerHit()");
+        /* 
+        if(!foundElectron){
+        for(int k=0; k < ecalHits->GetEntriesFast(); k++){
+            ldmx::EcalHit* hit = (ldmx::EcalHit*)ecalHits->At(k);
+            
+            double hitE = hit->getEnergy();
+            int rawID = hit->getID();
 
+            //The raw ID is packed with:
+            //4 bits for the subdetector, 8 cell layer bits, 3 module bits and 17 cell bits
+            //On the form: ccccccccccccccccc mmm llllllll ssss
+            //int layermask = 0xFF << 20;
+            //int layer = (layermask & rawID) >> 20;
+            int layermask = 0xFF << 4;
+            int layer = (layermask & rawID) >> 4;            
+
+            //int modulemask = 0x7 << 17;
+            //int module = (modulemask & rawID) >> 17;
+            int modulemask = 0x7 << 12;
+            int module = (modulemask & rawID) >> 12;
+
+            //int cellmask = 0x1FFFF;
+            //int cell = rawID & 0x1FFFF;
+            int cellmask = 0x1FFFF << 15;
+            int cell = (rawID & cellmask) >> 15;
+
+            int mcid_val = 10*cell+module;
+            //int mcid_index_slow = findCellIndex(mcid, mcid_val);
+            int mcid_index = (mcid_val % 10)*396 + (mcid_val - (mcid_val % 10))/10+ (mcid_val % 10);// + 1;
+           // std::cout << mcid_val << ":" <<mcid_index_slow << ":" << mcid_index << std::endl;
+
+            double hitX = cellX.at(mcid_index);
+            double hitY = cellY.at(mcid_index);
+
+            if(!(hitE > 0)){
+                continue;
+            }
+            allE.push_back(hitE);
+            allX.push_back(hitX);
+            allY.push_back(hitY);
+            allLayer.push_back(layer);
+            allmcid.push_back(mcid_index);
+
+            occupiedCellsProjected[mcid_index] = true;
+
+            wgtCentroidCoordsX += hitX*hitE;
+            wgtCentroidCoordsY += hitY*hitE;
+            
+            nHits += 1;
+            summedDet += hitE;
+
+            xMean += hitX*hitE;
+            yMean += hitY*hitE;
+            
+            avgLayerHit += layer;
+            wavgLayerHit += layer*hitE;
+
+        }
+        }
+        */
+
+        //Recalculate all other BDT features if noise is added
+        if(noise){
+            if(nHits > 0){
+                xMean /= summedDet;
+                yMean /= summedDet;
+                avgLayerHit /= nHits;
+                wavgLayerHit /= summedDet;
+            }
+            else{
+                xMean = 0;
+                yMean = 0;
+                avgLayerHit = 0;
+                wavgLayerHit = 0;
+            }
+
+            for(int k = 0; k < allE.size(); k++){
+                xStd += pow(allX.at(k)-xMean,2)*allE.at(k);
+                yStd += pow(allY.at(k)-yMean,2)*allE.at(k);
+                stdLayerHit += pow(allLayer.at(k)-wavgLayerHit,2)*allE.at(k);
+                
+                if(allLayer.at(k) > deepestLayerHit){
+                    deepestLayerHit = allLayer.at(k);
+                }
+                if(allE.at(k) > maxCellDep){
+                    maxCellDep = allE.at(k);
+                }
+            }
+            if(nHits > 0){
+                xStd = TMath::Sqrt(xStd / summedDet);
+                yStd = TMath::Sqrt(yStd / summedDet);
+                stdLayerHit = TMath::Sqrt(stdLayerHit/summedDet);
+            }
+            else{
+                xStd = 0;
+                yStd = 0;
+                stdLayerHit = 0;
+            }
+
+            wgtCentroidCoordsX = (summedDet > 1E-6) ? wgtCentroidCoordsX / summedDet : wgtCentroidCoordsX;
+            wgtCentroidCoordsY = (summedDet > 1E-6) ? wgtCentroidCoordsY / summedDet : wgtCentroidCoordsY;
+
+            int centroidIndex = -1;
+            double showerRMS = 0;
+            double maxDist = 1e6;
+
+            for(int k = 0; k < allE.size(); k++){
+                double deltaR = pow(pow((allX.at(k)-wgtCentroidCoordsX),2)+pow((allY.at(k)-wgtCentroidCoordsY),2),0.5);
+                showerRMS += deltaR*allE.at(k);
+                if(deltaR < maxDist){
+                    maxDist = deltaR;
+                    centroidIndex = k;
+                }
+            }
+            
+            if(centroidIndex >= 0){
+                int centroidMcid = allmcid.at(centroidIndex);
+
+
+                if(summedDet > 0){
+                    showerRMS = showerRMS / summedDet;
+                }
+
+                //double summedTightIso = 0;
+
+                for(int k = 0; k < allmcid.size(); k++){
+
+                    //Discard hit on centroid
+                    if(allmcid.at(k) == centroidMcid){
+                        continue;
+                    }
+                    
+                    bool NNCollision = false;
+
+                    //Discard nearest neighbours to centroid hit
+                    //for(int j = 0; j < NNMap[allmcid.at(k)].size(); j++){
+                    for(int j = 0; j < NNMap[centroidMcid].size(); j++){
+                        if(NNMap[centroidMcid].at(j) == allmcid.at(k)){
+                            NNCollision = true;
+                        }
+                    }
+                    if(NNCollision){
+                        continue;
+                    }
+
+                    //Discard non-isolated hits
+                    for(int j = 0; j < NNMap[allmcid.at(k)].size(); j++){
+                        //std::cout << allLayer.at(k) << ":" << NNMap[allmcid.at(k)].at(j) << std::endl;
+                        int n = allLayer.at(k)*2779+(int)NNMap[allmcid.at(k)].at(j); 
+                        //if(occupiedCells[allLayer.at(k)*2779+(int)NNMap[allmcid.at(k)].at(j)] == true){ 
+                        if(occupiedCells[n] == true){ 
+                        //if(occupiedCells[NNMap[allmcid.at(k)].at(j)] == true){ 
+                            NNCollision = true; 
+                        }
+                    }
+                    if(NNCollision){
+                        continue;
+                    }
+
+                    summedTightIso += allE.at(k);
+
+                }
+            }
+        }
+        else{ 
+            TPython::Exec("intree.GetEntry(i); i +=1");
+            nHits = TPython::Eval("ecalVetoRes[0].getNReadoutHits()");
+            summedDet = TPython::Eval("ecalVetoRes[0].getSummedDet()");
+            summedTightIso = TPython::Eval("ecalVetoRes[0].getSummedTightIso()");
+            maxCellDep = TPython::Eval("ecalVetoRes[0].getMaxCellDep()");
+            showerRMS = TPython::Eval("ecalVetoRes[0].getShowerRMS()");
+            xStd = TPython::Eval("ecalVetoRes[0].getXStd()");
+            yStd = TPython::Eval("ecalVetoRes[0].getYStd()");
+            avgLayerHit = TPython::Eval("ecalVetoRes[0].getAvgLayerHit()");
+            stdLayerHit = TPython::Eval("ecalVetoRes[0].getStdLayerHit()");
+            deepestLayerHit = TPython::Eval("ecalVetoRes[0].getDeepestLayerHit()");
+        }
         score = -1.0;
                
         std::vector<double> bdtFeatures{(double)nHits, (double)summedDet,(double)summedTightIso,maxCellDep,(double)showerRMS,(double)xStd,(double)yStd,(double)avgLayerHit,(double)deepestLayerHit,(double)stdLayerHit,ele68ContEnergy,ele68x2ContEnergy,ele68x3ContEnergy,ele68x4ContEnergy,ele68x5ContEnergy,photon68ContEnergy,photon68x2ContEnergy,photon68x3ContEnergy,photon68x4ContEnergy,photon68x5ContEnergy,outside68ContEnergy,outside68x2ContEnergy,outside68x3ContEnergy,outside68x4ContEnergy,outside68x5ContEnergy,outside68ContNHits,outside68x2ContNHits,outside68x3ContNHits,outside68x4ContNHits,outside68x5ContNHits,outside68ContXstd,outside68x2ContXstd,outside68x3ContXstd,outside68x4ContXstd,outside68x5ContXstd,outside68ContYstd,outside68x2ContYstd,outside68x3ContYstd,outside68x4ContYstd,outside68x5ContYstd,(double)ecalBackEnergy};
@@ -1002,11 +1433,24 @@ void eval(TString infilename, TString outfilename, bool noise = false){
         std::cout << "nHits: " << nHits<< std::endl;
 
         std::cout << "Score: " << score << std::endl;
-        */
+        */   
+ 
+        if(score > 0.999){
+            passed0_999 += 1;
+        }       
+
+        if(score > 0.999 && passesHcalVeto && passesTrackVeto){
+            passedAll += 1;
+        }
 
         outtree->Fill();
 
     }
+
+    std::cout << "Passed track veto: " << passedTrack << std::endl;
+    std::cout << "Passed Hcal veto: " << passedHcal << std::endl;
+    std::cout << "Passed 0.999 BDT score: " << passed0_999 << std::endl;
+    std::cout << "Passed all three cuts: " << passedAll << std::endl;
 
     std::cout << "Closing files" << std::endl;
 
