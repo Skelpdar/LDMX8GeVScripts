@@ -9,7 +9,7 @@
  *EcalVeto/bdtTreeMaker.py in IncandelaLab/LDMX-scripts
  */
 
-R__LOAD_LIBRARY(PATH/libEvent.so)
+R__LOAD_LIBRARY(/opt/ldmx-v1.7.0/lib/libEvent.so)
 
 #include "TFile.h"
 #include "TTree.h"
@@ -38,7 +38,9 @@ R__LOAD_LIBRARY(PATH/libEvent.so)
 #include "Event/FindableTrackResult.h"
 #include "Event/HcalVetoResult.h"
 #include "Event/HcalHit.h"
+#include "Event/TrackerVetoResult.h"
 
+//Converts a vector to string, so that it can be sent to Python
 TString vectorToPredCMD(std::vector<double> bdtFeatures) {
     TString featuresStrVector = "[[";
     for (int i = 0; i < bdtFeatures.size(); i++) {
@@ -54,6 +56,7 @@ TString vectorToPredCMD(std::vector<double> bdtFeatures) {
     return cmd;
 }
 
+//Translate ECal cell ID to an index of the 'mcid' vector
 int findCellIndex(std::vector<int> ids, int cellid){
     for(int i=0; i < 2779; i++){
         if(ids.at(i) == cellid){
@@ -81,7 +84,14 @@ Double_t sample4SigmaTail(TRandom3* rng){
     }
 }
 
-void eval(TString infilename, TString outfilename, bool noise = false, double noiseFactor = 1.25){
+/*
+ * Evaluates BDT score, track veto and HCal veto of data. 
+ * if noise = true, extra Gaussian noise is added to ECal Cells with a std. deviation of noiseFactor times the original std. deviation.
+ */
+
+void eval(TString infilename, TString outfilename, bool noise = false, double noiseFactor = 1.25, bool completeOutput = false, bool reconstruct = false){
+    //bool reconstruct = false;
+
     std::cout << "Starting BDT evaluation" << std::endl;
 
     TPython::Exec("print(\'Loading xgboost BDT\')"); 
@@ -89,7 +99,7 @@ void eval(TString infilename, TString outfilename, bool noise = false, double no
     TPython::Exec("import numpy as np");
     TPython::Exec("import pickle as pkl");
     TPython::Exec("print(\"xgboost version: \" + xgb.__version__)");
-    TPython::Exec("model = pkl.load(open(\'16001439_0_weights.pkl\','rb'))");
+    TPython::Exec("model = pkl.load(open(\'16001439wider_6_weights.pkl\','rb'))");
 
     TPython::Exec("print(\"Testing loaded model with zeros input\")");
     TPython::Exec("pred = float(model.predict(xgb.DMatrix(np.array([[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]])))[0])");
@@ -129,65 +139,22 @@ void eval(TString infilename, TString outfilename, bool noise = false, double no
         }
     }
  
-    //Constants
-
+    //Layer positions
     std::vector<double> layerZs{223.8000030517578, 226.6999969482422, 233.0500030517578, 237.4499969482422, 245.3000030517578, 251.1999969482422, 260.29998779296875,266.70001220703125, 275.79998779296875, 282.20001220703125, 291.29998779296875, 297.70001220703125, 306.79998779296875, 313.20001220703125,322.29998779296875, 328.70001220703125, 337.79998779296875, 344.20001220703125, 353.29998779296875, 359.70001220703125, 368.79998779296875,375.20001220703125, 384.29998779296875, 390.70001220703125, 403.29998779296875, 413.20001220703125, 425.79998779296875, 435.70001220703125,448.29998779296875, 458.20001220703125, 470.79998779296875, 480.70001220703125, 493.29998779296875, 503.20001220703125};
 
-    std::vector<double> radius_recoil_68_p_0_1000_theta_0_6{9.65155163169527,9.029949540117707,8.169116380219359,7.26878332423302,5.723387467629167,5.190678018534044,5.927290663506518,6.182560329200212,7.907549398117859,8.606100542857211,10.93381822596916,12.043201938160239,14.784548371508041,16.102403056546482,18.986402399412817,20.224453740305716,23.048820910305643,24.11202594672678,26.765135236851666,27.78700483852502,30.291794353801293,31.409870873194464,33.91006482486666,35.173073672355926,38.172422630271,40.880288341493205,44.696485719120005,49.23802839743545,53.789910813378675,60.87843355562641,66.32931132415688,75.78117972604727,86.04697356716805,96.90360704034346};
-    std::vector<double> radius_recoil_68_p_1000_end_theta_0_6{9.65155163169527,9.029949540117707,8.169116380219359,7.26878332423302,5.723387467629167,5.190678018534044,5.927290663506518,6.182560329200212,7.907549398117859,8.606100542857211,10.93381822596916,12.043201938160239,14.784548371508041,16.102403056546482,18.986402399412817,20.224453740305716,23.048820910305643,24.11202594672678,26.765135236851666,27.78700483852502,30.291794353801293,31.409870873194464,33.91006482486666,35.173073672355926,38.172422630271,40.880288341493205,44.696485719120005,49.23802839743545,53.789910813378675,60.87843355562641,66.32931132415688,75.78117972604727,86.04697356716805,96.90360704034346};
-    std::vector<double> radius_recoil_68_theta_6_15{6.486368894455214,6.235126063894043,6.614742647173138,7.054111110170857,7.6208431229479645,8.262931570498493,10.095697703256274,11.12664183734125,13.463274649564859,14.693527904936063,17.185557959405358,18.533873226278285,21.171912124279075,22.487821335146958,25.27214729142235,26.692900194943586,29.48033347163334,30.931911179461117,33.69749728369263,35.35355537189422,37.92163028706617,40.08541101327325,42.50547781670488,44.42600915526537,48.18838292957783,50.600428280254235,55.85472906972822,60.88022977643599,68.53506382625108,73.0547148939902,78.01129860152466,90.91421661272666,104.54696678290463,116.90671501444335};
-    std::vector<double> radius_recoil_68_theta_15_end{7.218181823299591,7.242577749118457,9.816977116964644,12.724324104744532,17.108322705113288,20.584866353828193,25.036863838363544,27.753201816619153,32.08174405069556,34.86092888550297,39.56748303616661,43.37808998888681,48.50525488266305,52.66203291220487,58.00763047516536,63.028585648616584,69.21745026096245,74.71857224945907,82.15269906028466,89.1198060894434,95.15548897621329,103.91086738998598,106.92403611582472,115.76216727231979,125.72534759956525,128.95688953061537,140.84273174274335,151.13069543119798,163.87399183389545,171.8032189173357,186.89216628021853,200.19270470457505,219.32987417488016,236.3947885046377};
+    //Containment radii for 8 GeV
+    //std::vector<double> radius_recoil_68_p_0_1000_theta_0_6{9.65155163169527,9.029949540117707,8.169116380219359,7.26878332423302,5.723387467629167,5.190678018534044,5.927290663506518,6.182560329200212,7.907549398117859,8.606100542857211,10.93381822596916,12.043201938160239,14.784548371508041,16.102403056546482,18.986402399412817,20.224453740305716,23.048820910305643,24.11202594672678,26.765135236851666,27.78700483852502,30.291794353801293,31.409870873194464,33.91006482486666,35.173073672355926,38.172422630271,40.880288341493205,44.696485719120005,49.23802839743545,53.789910813378675,60.87843355562641,66.32931132415688,75.78117972604727,86.04697356716805,96.90360704034346};
+    //std::vector<double> radius_recoil_68_p_1000_end_theta_0_6{9.65155163169527,9.029949540117707,8.169116380219359,7.26878332423302,5.723387467629167,5.190678018534044,5.927290663506518,6.182560329200212,7.907549398117859,8.606100542857211,10.93381822596916,12.043201938160239,14.784548371508041,16.102403056546482,18.986402399412817,20.224453740305716,23.048820910305643,24.11202594672678,26.765135236851666,27.78700483852502,30.291794353801293,31.409870873194464,33.91006482486666,35.173073672355926,38.172422630271,40.880288341493205,44.696485719120005,49.23802839743545,53.789910813378675,60.87843355562641,66.32931132415688,75.78117972604727,86.04697356716805,96.90360704034346};
+    //std::vector<double> radius_recoil_68_theta_6_15{6.486368894455214,6.235126063894043,6.614742647173138,7.054111110170857,7.6208431229479645,8.262931570498493,10.095697703256274,11.12664183734125,13.463274649564859,14.693527904936063,17.185557959405358,18.533873226278285,21.171912124279075,22.487821335146958,25.27214729142235,26.692900194943586,29.48033347163334,30.931911179461117,33.69749728369263,35.35355537189422,37.92163028706617,40.08541101327325,42.50547781670488,44.42600915526537,48.18838292957783,50.600428280254235,55.85472906972822,60.88022977643599,68.53506382625108,73.0547148939902,78.01129860152466,90.91421661272666,104.54696678290463,116.90671501444335};
+    //std::vector<double> radius_recoil_68_theta_15_end{7.218181823299591,7.242577749118457,9.816977116964644,12.724324104744532,17.108322705113288,20.584866353828193,25.036863838363544,27.753201816619153,32.08174405069556,34.86092888550297,39.56748303616661,43.37808998888681,48.50525488266305,52.66203291220487,58.00763047516536,63.028585648616584,69.21745026096245,74.71857224945907,82.15269906028466,89.1198060894434,95.15548897621329,103.91086738998598,106.92403611582472,115.76216727231979,125.72534759956525,128.95688953061537,140.84273174274335,151.13069543119798,163.87399183389545,171.8032189173357,186.89216628021853,200.19270470457505,219.32987417488016,236.3947885046377};
 
-
+    //The same containment radii but in one long vector
 
     std::vector<double> radii{9.65155163169527,9.029949540117707,8.169116380219359,7.26878332423302,5.723387467629167,5.190678018534044,5.927290663506518,6.182560329200212,7.907549398117859,8.606100542857211,10.93381822596916,12.043201938160239,14.784548371508041,16.102403056546482,18.986402399412817,20.224453740305716,23.048820910305643,24.11202594672678,26.765135236851666,27.78700483852502,30.291794353801293,31.409870873194464,33.91006482486666,35.173073672355926,38.172422630271,40.880288341493205,44.696485719120005,49.23802839743545,53.789910813378675,60.87843355562641,66.32931132415688,75.78117972604727,86.04697356716805,96.90360704034346,9.65155163169527,9.029949540117707,8.169116380219359,7.26878332423302,5.723387467629167,5.190678018534044,5.927290663506518,6.182560329200212,7.907549398117859,8.606100542857211,10.93381822596916,12.043201938160239,14.784548371508041,16.102403056546482,18.986402399412817,20.224453740305716,23.048820910305643,24.11202594672678,26.765135236851666,27.78700483852502,30.291794353801293,31.409870873194464,33.91006482486666,35.173073672355926,38.172422630271,40.880288341493205,44.696485719120005,49.23802839743545,53.789910813378675,60.87843355562641,66.32931132415688,75.78117972604727,86.04697356716805,96.90360704034346,6.486368894455214,6.235126063894043,6.614742647173138,7.054111110170857,7.6208431229479645,8.262931570498493,10.095697703256274,11.12664183734125,13.463274649564859,14.693527904936063,17.185557959405358,18.533873226278285,21.171912124279075,22.487821335146958,25.27214729142235,26.692900194943586,29.48033347163334,30.931911179461117,33.69749728369263,35.35355537189422,37.92163028706617,40.08541101327325,42.50547781670488,44.42600915526537,48.18838292957783,50.600428280254235,55.85472906972822,60.88022977643599,68.53506382625108,73.0547148939902,78.01129860152466,90.91421661272666,104.54696678290463,116.90671501444335,7.218181823299591,7.242577749118457,9.816977116964644,12.724324104744532,17.108322705113288,20.584866353828193,25.036863838363544,27.753201816619153,32.08174405069556,34.86092888550297,39.56748303616661,43.37808998888681,48.50525488266305,52.66203291220487,58.00763047516536,63.028585648616584,69.21745026096245,74.71857224945907,82.15269906028466,89.1198060894434,95.15548897621329,103.91086738998598,106.92403611582472,115.76216727231979,125.72534759956525,128.95688953061537,140.84273174274335,151.13069543119798,163.87399183389545,171.8032189173357,186.89216628021853,200.19270470457505,219.32987417488016,236.3947885046377};
+    
     //Input file
-
     TFile* infile = new TFile(infilename);
     TTree* intree = (TTree*)infile->Get("LDMX_Events");
-    
-    //Float_t ecalBackEnergy;
-    //intree->SetBranchAddress("EcalVeto_recon.ecalBackEnergy_", &ecalBackEnergy);
-
-    //Float_t yStd;
-    //intree->SetBranchAddress("EcalVeto_recon.yStd_", &yStd);
-    //TPython::Bind(yStd,"yStd");
-
-    //Float_t xStd;
-    //intree->SetBranchAddress("EcalVeto_recon.xStd_", &xStd);
-    //TPython::Bind(xStd,"xStd");
-
-    //Float_t showerRMS;
-    //intree->SetBranchAddress("EcalVeto_recon.showerRMS_", &showerRMS);
-    //TPython::Bind(showerRMS,"showerRMS");
-
-    //Float_t maxCellDep;
-    //intree->SetBranchAddress("EcalVeto_recon.maxCellDep_", &maxCellDep);
-    //TPython::Bind(maxCellDep,"maxCellDep");
-    
-    //Float_t summedTightIso;
-    //intree->SetBranchAddress("EcalVeto_recon.summedTightIso_", &summedTightIso);
-    //TPython::Bind(summedTightIso, "summedTightIso");
-
-    //Float_t summedDet;
-    //intree->SetBranchAddress("EcalVeto_recon.summedDet_", &summedDet);
-    //TPython::Bind(summedDet, "summedDet");
-
-    //Int_t nHits;
-    //intree->SetBranchAddress("EcalVeto_recon.nReadoutHits_",&nHits); 
-    //TPython::Bind(nHits,"nHits");
-
-    //Float_t stdLayerHit;
-    //intree->SetBranchAddress("EcalVeto_recon.stdLayerHit_",&stdLayerHit);
-    //TPython::Bind(stdLayerHit,"stdLayerHit");
-
-    //Int_t deepestLayerHit;
-    //intree->SetBranchAddress("EcalVeto_recon.deepestLayerHit_",&deepestLayerHit);
-    //TPython::Bind(deepestLayerHit,"deppestLayerHit");
-
-    //Float_t avgLayerHit;
-    //intree->SetBranchAddress("EcalVeto_recon.avgLayerHit_",&avgLayerHit);
-    //TPython::Bind(avgLayerHit,"avgLayerHit");
     
     Int_t nHits;
     Float_t summedDet;
@@ -202,6 +169,9 @@ void eval(TString infilename, TString outfilename, bool noise = false, double no
 
     TClonesArray* ecalHits = new TClonesArray("ldmx::EcalHit");
     intree->SetBranchAddress("ecalDigis_recon",&ecalHits);
+
+    TClonesArray* hcalHits = new TClonesArray("ldmx::HcalHit");
+    intree->SetBranchAddress("hcalDigis_recon",&hcalHits);
 
     TClonesArray* simParticles = new TClonesArray("ldmx::SimParticle");
     intree->SetBranchAddress("SimParticles_sim", &simParticles);
@@ -220,6 +190,12 @@ void eval(TString infilename, TString outfilename, bool noise = false, double no
 
     TClonesArray* hcalVetoResult = new TClonesArray("ldmx::HcalVetoResult");
     intree->SetBranchAddress("HcalVeto_recon",&hcalVetoResult);
+
+    //TClonesArray* trackerVetoResult = new TClonesArray("ldmx::TrackerVetoResult");
+    //intree->SetBranchAddress("TrackerVeto_recon",&trackerVetoResult);
+    //TClonesArray* trackerVetoResultRerecon = new TClonesArray("ldmx::TrackerVetoResult");
+    //intree->SetBranchAddress("TrackerVeto_rerecon",&trackerVetoResultRerecon);
+    //bool isRerecon = false;
 
     TPython::Exec("ecalVetoRes = ROOT.TClonesArray(\"ldmx::EcalVetoResult\")");
     TPython::Bind(intree,"intree");
@@ -242,7 +218,41 @@ void eval(TString infilename, TString outfilename, bool noise = false, double no
     int maxPE;
     auto maxPEBranch = outtree->Branch("maxPE", &maxPE);
 
-    //Process all events
+    int numOfFindableTracks;
+    auto numOfFindableTracksBranch = outtree->Branch("numOfFindableTracks", &numOfFindableTracks);
+
+    double recoilP;
+    auto recoilPBranch = outtree->Branch("recoilP", &recoilP);
+
+    double recoilElectronP;
+    auto recoilElectronPBranch = outtree->Branch("recoilElectronP", &recoilElectronP);
+
+    double recoilPt;
+    auto recoilPtBranch = outtree->Branch("recoilPt", &recoilPt);
+
+    double frontEcal;
+    auto frontEcalBranch = outtree->Branch("frontEcal", &frontEcal);
+
+    int anomolousParticle;
+    auto anomolousParticleBranch = outtree->Branch("anomolousParticle", &anomolousParticle);
+
+    bool foundElectron;
+    auto foundElectronBranch = outtree->Branch("foundElectron", &foundElectron);
+
+    if(completeOutput){
+        auto nHitsBranch = outtree->Branch("nHits", &nHits);
+        auto summedDetBranch = outtree->Branch("summedDet", &summedDet);
+        auto summedTightIsoBRanch = outtree->Branch("summedTightIso", &summedTightIso);
+        auto maxCellDepBranch = outtree->Branch("maxCellDep", &maxCellDep);
+        auto showerRMSBranch = outtree->Branch("showerRMS", &showerRMS);
+        auto xStdBranch = outtree->Branch("xStd", &xStd);
+        auto yStdBranch = outtree->Branch("yStd", &yStd);
+        auto avgLayerHitBranch = outtree->Branch("avgLayerHit", &avgLayerHit);
+        auto stdLayerHitBranch = outtree->Branch("stdLayerHit", &stdLayerHit);
+        auto deepestLayerHitBranch = outtree->Branch("deepestLayerHitBranch", &deepestLayerHit);
+    }
+
+    //Process events
 
     std::cout << "Processing " << intree->GetEntriesFast() << " events" << std::endl;
 
@@ -260,7 +270,7 @@ void eval(TString infilename, TString outfilename, bool noise = false, double no
 
     TPython::Exec("i=0");
     for(int i=0; i<intree->GetEntriesFast(); i++){
-    //for(int i=0; i<5; i++){
+    //for(int i=0; i<1; i++){
 
         //std::cout << i << std::endl;
         
@@ -274,6 +284,7 @@ void eval(TString infilename, TString outfilename, bool noise = false, double no
         avgLayerHit = 0; 
         stdLayerHit = 0;
         deepestLayerHit = 0; 
+        frontEcal = 0;
 
         Float_t xMean = 0;
         Float_t yMean = 0;
@@ -284,7 +295,7 @@ void eval(TString infilename, TString outfilename, bool noise = false, double no
         //Find electron and photon trajectories
         std::vector<double> pvec;
         std::vector<float> pos;
-        bool foundElectron = false;
+        foundElectron = false;
         bool foundTargetElectron = false;
         //Electron at target
         std::vector<double> pvec0;
@@ -334,73 +345,102 @@ void eval(TString infilename, TString outfilename, bool noise = false, double no
                         foundTargetElectron = true;
                     }
                 }
-
             }
         }
 
+        anomolousParticle = -1;
+        for(int k=0; k < simParticles->GetEntriesFast(); k++){
+            ldmx::SimParticle* particle = (ldmx::SimParticle*)simParticles->At(k);
+            int particleTrackID = particle->getTrackID();
+            for(int j=0; j < targetSPHits->GetEntriesFast(); j++){
+                ldmx::SimTrackerHit* hit = (ldmx::SimTrackerHit*)targetSPHits->At(j);
+
+                int hitTrackID = hit->getTrackID();
+
+                if(hitTrackID == particleTrackID && hit->getLayerID() == 2){
+                    //pvec0 = hit->getMomentum();
+                    //pos0 = hit->getPosition();
+                    //foundTargetElectron = true;
+                    int id = particle->getPdgID();
+                    if(id != 22 && id != 11  && id != -11){
+                        anomolousParticle = id;
+                    }
+                }
+            }
+        }
+    
+        recoilPt = -1;
+        recoilElectronP = -1;
+        if(foundTargetElectron){
+            recoilPt = TMath::Sqrt(pow(pvec0.at(0),2)+pow(pvec0.at(1),2));
+            recoilElectronP = TMath::Sqrt(pow(pvec0.at(0),2)+pow(pvec0.at(1),2)+pow(pvec0.at(2),2));
+        }       
+
         //Check track veto        
-        int numOfFindableTracks = 0;
+        numOfFindableTracks = 0;
         bool trackFindable = false; 
         std::vector<double> trackP;
-
-        std::vector<int> trackIDs;
-
+        
         for(int k=0; k < findableTracks->GetEntriesFast(); k++){
             
             ldmx::FindableTrackResult* track = (ldmx::FindableTrackResult*)findableTracks->At(k);
 
             if(track->is4sFindable() || track->is3s1aFindable() || track->is2s2aFindable()){
-            //if(true){
-               
-                //Removes possible "findableTrack" duplicates from the same particle
-                if(std::find(trackIDs.begin(), trackIDs.end(), track->getSimParticle()->getTrackID()) == trackIDs.end()){       
-                    numOfFindableTracks += 1;
-                }
-
-                trackIDs.push_back(track->getSimParticle()->getTrackID());
+                numOfFindableTracks += 1;
 
                 ldmx::SimParticle* particle = track->getSimParticle();
-    
-                int particleTrackID = particle->getTrackID();
 
                 //Find momentum from SP hit
                 for(int j=0; j < targetSPHits->GetEntriesFast(); j++){
                     ldmx::SimTrackerHit* hit = (ldmx::SimTrackerHit*)targetSPHits->At(j);
 
-                    int hitTrackID = hit->getTrackID();
-
-                    if(hitTrackID == particleTrackID && hit->getLayerID() == 2){
+                    if((ldmx::SimParticle*)hit->getSimParticle() == particle && hit->getLayerID() == 2){
                         trackP = hit->getMomentum();
-                        std::cout << hit->getPdgID() << std::endl;
-                        trackFindable = true;
+                        if(trackP.at(2) > 0){
+                            trackFindable = true;
+                        }
                     }
                 }
             }
         }
 
-        //std::cout << numOfFindableTracks << ":" << trackFindable<< std::endl;
-
         passesTrackVeto = false;
 
+        recoilP = -1;
+        
         if(numOfFindableTracks == 1 && trackFindable){
-            if(TMath::Sqrt(pow(trackP.at(0),2)+pow(trackP.at(1),2)+pow(trackP.at(2),2)) < 2400){
+            recoilP = TMath::Sqrt(pow(trackP.at(0),2)+pow(trackP.at(1),2)+pow(trackP.at(2),2));
+            if(recoilP < 2400){
                 passesTrackVeto = true;
             }
         }
-
-        //std::cout << numOfFindableTracks << ":" << trackFindable << ":" << passesTrackVeto << std::endl;
 
         if(passesTrackVeto){
             passedTrack += 1;
         }
 
         //Hcal veto
-        ldmx::HcalHit* hcalhit = ((ldmx::HcalVetoResult*)hcalVetoResult->At(0))->getMaxPEHit();
+        //Do not use the results from HcalVetoResult, it may not be correct
 
-        maxPE = hcalhit->getPE(); 
+        maxPE = -1;
+        for(int k = 0; k < hcalHits->GetEntriesFast(); k++){
+            ldmx::HcalHit* h = (ldmx::HcalHit*)hcalHits->At(k);
+
+            int pe = h->getPE();    
+
+            if(h->getTime() >= 50) continue;
+            if(h->getZ() > 4000) continue;
+
+            //Check for photo-electrons on the back side of the hcal cell
+            if(h->getSection() == 0 && h->getMinPE() < 1) continue; 
+
+            if(pe > maxPE){
+                maxPE = pe;
+            }
+        }
 
         passesHcalVeto = false;
-        if(maxPE < 5){
+        if(maxPE < 8){
             passedHcal += 1;
             passesHcalVeto = true;
         }        
@@ -422,20 +462,14 @@ void eval(TString infilename, TString outfilename, bool noise = false, double no
         std::vector<double> photonPosY;
        
         if(foundTargetElectron){
-            //std::vector<double> photonP{-pvec0.at(0),-pvec0.at(1),pvec0.at(2)};
             photonP.push_back(-pvec0.at(0));
             photonP.push_back(-pvec0.at(1));
-            //???
             photonP.push_back(8000-pvec0.at(2));
             for(auto ite = layerZs.begin(); ite < layerZs.end(); ite++){
                 photonPosX.push_back(pos0.at(0) + photonP.at(0)/photonP.at(2)*(*ite - pos0.at(2)));
                 photonPosY.push_back(pos0.at(1) + photonP.at(1)/photonP.at(2)*(*ite - pos0.at(2)));
             }
         }
-
-        //std::cout << foundTargetElectron << ":" << foundElectron << std::endl;
-
-        //std::cout << "PhotonP " << photonP.at(0) << ":" << photonP.at(1) << ":" << photonP.at(2) << std::endl;
        
         double theta = -1;
         double magnitude = -1;
@@ -465,7 +499,6 @@ void eval(TString infilename, TString outfilename, bool noise = false, double no
         int ip = 1;
 
         //Calculate energy containment variables 
-
         
         double ele68ContEnergy = 0;
         double ele68x2ContEnergy = 0;
@@ -658,6 +691,9 @@ void eval(TString infilename, TString outfilename, bool noise = false, double no
 
                 summedDet += hitE;
                 nHits++;
+                if(layer < 20){
+                    frontEcal += hitE;
+                }
 
                 xMean += hitX*hitE;
                 yMean += hitY*hitE;
@@ -807,7 +843,8 @@ void eval(TString infilename, TString outfilename, bool noise = false, double no
 
         }
         //This isn't used if noise is not introduced 
-        if(!foundElectron && noise){
+        //if(!foundElectron && (noise || reconstruct)){
+        if(!foundElectron){
                 for(int k=0; k < ecalHits->GetEntriesFast(); k++){
                     ldmx::EcalHit* hit = (ldmx::EcalHit*)ecalHits->At(k);
                     
@@ -872,6 +909,9 @@ void eval(TString infilename, TString outfilename, bool noise = false, double no
                     
                     nHits += 1;
                     summedDet += hitE;
+                    if(layer < 20){
+                        frontEcal += hitE;
+                    }
 
                     xMean += hitX*hitE;
                     yMean += hitY*hitE;
@@ -909,6 +949,9 @@ void eval(TString infilename, TString outfilename, bool noise = false, double no
                 
                         summedDet += hitE;
                         nHits++;
+                        if(layer < 20){
+                            frontEcal += hitE;
+                        }
                         
                         double hitX = cellX.at(mcid_index);
                         double hitY = cellY.at(mcid_index);
@@ -1203,70 +1246,9 @@ void eval(TString infilename, TString outfilename, bool noise = false, double no
             outside68x5ContXstd = TMath::Sqrt(outside68x5ContXstd/outside68x5ContEnergy);
             outside68x5ContYstd = TMath::Sqrt(outside68x5ContYstd/outside68x5ContEnergy);
         }
-
-        /* 
-        if(!foundElectron){
-        for(int k=0; k < ecalHits->GetEntriesFast(); k++){
-            ldmx::EcalHit* hit = (ldmx::EcalHit*)ecalHits->At(k);
-            
-            double hitE = hit->getEnergy();
-            int rawID = hit->getID();
-
-            //The raw ID is packed with:
-            //4 bits for the subdetector, 8 cell layer bits, 3 module bits and 17 cell bits
-            //On the form: ccccccccccccccccc mmm llllllll ssss
-            //int layermask = 0xFF << 20;
-            //int layer = (layermask & rawID) >> 20;
-            int layermask = 0xFF << 4;
-            int layer = (layermask & rawID) >> 4;            
-
-            //int modulemask = 0x7 << 17;
-            //int module = (modulemask & rawID) >> 17;
-            int modulemask = 0x7 << 12;
-            int module = (modulemask & rawID) >> 12;
-
-            //int cellmask = 0x1FFFF;
-            //int cell = rawID & 0x1FFFF;
-            int cellmask = 0x1FFFF << 15;
-            int cell = (rawID & cellmask) >> 15;
-
-            int mcid_val = 10*cell+module;
-            //int mcid_index_slow = findCellIndex(mcid, mcid_val);
-            int mcid_index = (mcid_val % 10)*396 + (mcid_val - (mcid_val % 10))/10+ (mcid_val % 10);// + 1;
-           // std::cout << mcid_val << ":" <<mcid_index_slow << ":" << mcid_index << std::endl;
-
-            double hitX = cellX.at(mcid_index);
-            double hitY = cellY.at(mcid_index);
-
-            if(!(hitE > 0)){
-                continue;
-            }
-            allE.push_back(hitE);
-            allX.push_back(hitX);
-            allY.push_back(hitY);
-            allLayer.push_back(layer);
-            allmcid.push_back(mcid_index);
-
-            occupiedCellsProjected[mcid_index] = true;
-
-            wgtCentroidCoordsX += hitX*hitE;
-            wgtCentroidCoordsY += hitY*hitE;
-            
-            nHits += 1;
-            summedDet += hitE;
-
-            xMean += hitX*hitE;
-            yMean += hitY*hitE;
-            
-            avgLayerHit += layer;
-            wavgLayerHit += layer*hitE;
-
-        }
-        }
-        */
-
+        
         //Recalculate all other BDT features if noise is added
-        if(noise){
+        if(noise || reconstruct){
             if(nHits > 0){
                 xMean /= summedDet;
                 yMean /= summedDet;
