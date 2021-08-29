@@ -39,6 +39,7 @@ R__LOAD_LIBRARY(/opt/ldmx-v1.7.0/lib/libEvent.so)
 #include "Event/HcalVetoResult.h"
 #include "Event/HcalHit.h"
 #include "Event/TrackerVetoResult.h"
+#include "Event/EventHeader.h"
 
 //Converts a vector to string, so that it can be sent to Python
 TString vectorToPredCMD(std::vector<double> bdtFeatures) {
@@ -191,15 +192,26 @@ void eval(TString infilename, TString outfilename, bool noise = false, double no
     TClonesArray* hcalVetoResult = new TClonesArray("ldmx::HcalVetoResult");
     intree->SetBranchAddress("HcalVeto_recon",&hcalVetoResult);
 
+    //TClonesArray* eventHeader = new TClonesArray("ldmx::EventHeader");
+    //ldmx::EventHeader* eventHeader;
+    //double* eventWeight;
+    //intree->SetBranchAddress("EventHeader/weight_",&eventWeight);
+
+
     //TClonesArray* trackerVetoResult = new TClonesArray("ldmx::TrackerVetoResult");
     //intree->SetBranchAddress("TrackerVeto_recon",&trackerVetoResult);
     //TClonesArray* trackerVetoResultRerecon = new TClonesArray("ldmx::TrackerVetoResult");
     //intree->SetBranchAddress("TrackerVeto_rerecon",&trackerVetoResultRerecon);
     //bool isRerecon = false;
 
+    //Why can't I manage to read this in pure ROOT...
     TPython::Exec("ecalVetoRes = ROOT.TClonesArray(\"ldmx::EcalVetoResult\")");
+    TPython::Exec("evHeader = ROOT.ldmx.EventHeader()");
     TPython::Bind(intree,"intree");
     TPython::Exec("intree.SetBranchAddress(\"EcalVeto_recon\",ecalVetoRes)");
+    TPython::Exec("intree.SetBranchAddress(\"EventHeader\",evHeader)");
+
+    double eventWeight;
 
     //Output
 
@@ -239,6 +251,8 @@ void eval(TString infilename, TString outfilename, bool noise = false, double no
     bool foundElectron;
     auto foundElectronBranch = outtree->Branch("foundElectron", &foundElectron);
 
+    auto eventWeightBranch = outtree->Branch("eventWeight", &eventWeight);
+    
     if(completeOutput){
         auto nHitsBranch = outtree->Branch("nHits", &nHits);
         auto summedDetBranch = outtree->Branch("summedDet", &summedDet);
@@ -272,8 +286,11 @@ void eval(TString infilename, TString outfilename, bool noise = false, double no
     for(int i=0; i<intree->GetEntriesFast(); i++){
     //for(int i=0; i<1; i++){
 
+        TPython::Exec("intree.GetEntry(i); i +=1");
         //std::cout << i << std::endl;
-        
+     
+        eventWeight = TPython::Eval("evHeader.getWeight()");
+   
         nHits = 0; 
         summedDet = 0; 
         summedTightIso = 0; 
@@ -1351,7 +1368,7 @@ void eval(TString infilename, TString outfilename, bool noise = false, double no
             }
         }
         else{ 
-            TPython::Exec("intree.GetEntry(i); i +=1");
+            //TPython::Exec("intree.GetEntry(i); i +=1");
             nHits = TPython::Eval("ecalVetoRes[0].getNReadoutHits()");
             summedDet = TPython::Eval("ecalVetoRes[0].getSummedDet()");
             summedTightIso = TPython::Eval("ecalVetoRes[0].getSummedTightIso()");
