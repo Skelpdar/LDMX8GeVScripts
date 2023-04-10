@@ -24,4 +24,8 @@ Calculates ROC curves: ROC.py
 
 # Plotting scripts (requires inkscape to be installed):
 
+Photo-electron separation plot: plots/peSeparationBoth.py  
 
+BDT Score separation plot: plots/scoreSeparation2.py  
+
+BDT score vs PEs plot: plots/scorevsPEdouble.py
